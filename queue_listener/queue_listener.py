@@ -9,6 +9,8 @@ import rollbar
 
 import sys
 
+from document_validation import DocumentRejected, checked_etag, checked_source_key, validate_docx_file
+
 
 def eprint(*args, **kwargs):
     print(*args, **kwargs, file=sys.stderr)
@@ -68,8 +70,12 @@ def handle_message(s3_client, sqs_client, queue_url, message):
     json_body = json.loads(message["Body"])
     for record in json_body.get("Records", []):
         bucket_name = record["s3"]["bucket"]["name"]  # or ['arn']
-        download_key = record["s3"]["object"]["key"]
-        etag = record["s3"]["object"]["eTag"].replace('"', "")
+        try:
+            download_key = checked_source_key(record["s3"]["object"]["key"])
+            etag = checked_etag(record["s3"]["object"]["eTag"])
+        except (KeyError, TypeError, DocumentRejected) as exception:
+            eprint(f"Rejected invalid document event: {exception}")
+            continue
         docx_filename = f"/tmp/{etag}.docx"
         pdf_filename = f"/tmp/{etag}.pdf"
 
@@ -93,6 +99,12 @@ def handle_message(s3_client, sqs_client, queue_url, message):
 
         eprint(f"Downloading {download_key}")
         s3_client.download_file(Bucket=bucket_name, Key=download_key, Filename=docx_filename)
+        try:
+            validate_docx_file(docx_filename)
+        except DocumentRejected as exception:
+            eprint(f"Rejected invalid DOCX before conversion: {exception}")
+            os.remove(docx_filename)
+            continue
 
         # this could probably fail, we should do something about that
 
